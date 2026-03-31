@@ -47,7 +47,7 @@ async def handle_webhook(request: Request):
     # 3. Line Crossing 처리
     if event_category == "line_crossing":
         
-        # 들어온 웹훅 데이터에서 카메라 ID 추출 (없을 경우 "Unknown" 처리)
+        # 들어온 웹훅 데이터에서 카메라 ID 추출
         incoming_camera_id = payload.get("data", {}).get("camera_id", "Unknown")
         
         # 카메라 ID 필터링 로직
@@ -70,35 +70,32 @@ async def handle_webhook(request: Request):
         last_heartbeat_str = await redis_client.get("last_heartbeat")
         last_heartbeat = int(last_heartbeat_str) if last_heartbeat_str else 0
         
-        helix_attributes = {}
-
-        # ★ [수정됨] 조건에 따른 Helix Payload에 "Camera ID" 필드 추가
+        # ★ [수정됨] 조건 A: 지게차/Shelly 오프라인 상태 처리 로직 변경
         if now - last_heartbeat > 10000:
+            print("Shelly 오프라인 상태(Heartbeat 10초 초과)이므로 Helix 전송을 생략하고 종료합니다.")
+            return {"message": "Shelly is offline. Helix sending skipped."}
+            
+        # 조건 B: 지게차/Shelly 온라인 상태 (정상 작동 중)
+        await redis_client.set("switch_status", "0")
+        await asyncio.sleep(5) 
+        
+        switch_status = await redis_client.get("switch_status")
+        
+        helix_attributes = {}
+        if switch_status == "1":
             helix_attributes = {
-                "Smart Relay": "Off", 
+                "Smart Relay": "On", 
+                "Line Crossing": "detected", 
+                "Brake": "Hit",
+                "Camera ID": incoming_camera_id
+            }
+        else:
+            helix_attributes = {
+                "Smart Relay": "On", 
                 "Line Crossing": "detected", 
                 "Brake": "FailtoBrake",
                 "Camera ID": incoming_camera_id
             }
-        else:
-            await redis_client.set("switch_status", "0")
-            await asyncio.sleep(5) 
-            
-            switch_status = await redis_client.get("switch_status")
-            if switch_status == "1":
-                helix_attributes = {
-                    "Smart Relay": "On", 
-                    "Line Crossing": "detected", 
-                    "Brake": "Hit",
-                    "Camera ID": incoming_camera_id
-                }
-            else:
-                helix_attributes = {
-                    "Smart Relay": "On", 
-                    "Line Crossing": "detected", 
-                    "Brake": "FailtoBrake",
-                    "Camera ID": incoming_camera_id
-                }
 
         # Verkada API 호출 (Token 발급 -> Helix 전송)
         async with httpx.AsyncClient() as client:
