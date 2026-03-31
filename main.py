@@ -13,8 +13,7 @@ VERKADA_API_KEY = os.getenv("VERKADA_API_KEY")
 TARGET_CAMERA_ID = os.getenv("TARGET_CAMERA_ID")
 ORG_ID = os.getenv("ORG_ID", "607ef9ff-2910-4a68-bfe6-318836f42d12")
 
-# ★ [추가됨] 허용할 카메라 ID 목록 불러오기 (쉼표로 구분된 문자열을 리스트로 변환)
-# 예: "cam-id-1,cam-id-2,cam-id-3" -> ["cam-id-1", "cam-id-2", "cam-id-3"]
+# 허용할 카메라 ID 목록
 ALLOWED_CAMERAS_STR = os.getenv("ALLOWED_CAMERA_IDS", "")
 ALLOWED_CAMERAS = [cam.strip() for cam in ALLOWED_CAMERAS_STR.split(",") if cam.strip()]
 
@@ -45,22 +44,20 @@ async def handle_webhook(request: Request):
         await redis_client.set("switch_status", "1")
         return {"message": "Switch event recorded"}
 
-    # 3. Line Crossing 처리 (필터링 및 쿨다운 적용)
+    # 3. Line Crossing 처리
     if event_category == "line_crossing":
         
-        # --- [추가됨: 1. 카메라 ID 필터링 로직] ---
-        # 들어온 웹훅 데이터에서 카메라 ID를 추출합니다.
-        incoming_camera_id = payload.get("data", {}).get("camera_id")
+        # 들어온 웹훅 데이터에서 카메라 ID 추출 (없을 경우 "Unknown" 처리)
+        incoming_camera_id = payload.get("data", {}).get("camera_id", "Unknown")
         
-        # 허용된 카메라 목록이 등록되어 있고, 들어온 카메라 ID가 그 목록에 없다면 무시합니다.
+        # 카메라 ID 필터링 로직
         if ALLOWED_CAMERAS and incoming_camera_id not in ALLOWED_CAMERAS:
             print(f"필터링됨: 허용되지 않은 카메라의 알림입니다. (ID: {incoming_camera_id})")
             return {"message": f"Camera {incoming_camera_id} is not in allowed list. Ignored."}
-        # ----------------------------------------
 
         now = int(time.time() * 1000)
         
-        # --- [2. 쿨다운 로직] ---
+        # 쿨다운 로직
         last_crossing_str = await redis_client.get("last_line_crossing")
         last_crossing = int(last_crossing_str) if last_crossing_str else 0
         
@@ -69,26 +66,39 @@ async def handle_webhook(request: Request):
             return {"message": "Cooldown active. Ignored."}
             
         await redis_client.set("last_line_crossing", now)
-        # ------------------------
 
         last_heartbeat_str = await redis_client.get("last_heartbeat")
         last_heartbeat = int(last_heartbeat_str) if last_heartbeat_str else 0
         
         helix_attributes = {}
 
-        # 조건 A: 지게차 시동 꺼짐 (10초 이상 Heartbeat 없음)
+        # ★ [수정됨] 조건에 따른 Helix Payload에 "Camera ID" 필드 추가
         if now - last_heartbeat > 10000:
-            helix_attributes = {"Smart Relay": "Off", "Line Crossing": "detected", "Brake": "FailtoBrake"}
+            helix_attributes = {
+                "Smart Relay": "Off", 
+                "Line Crossing": "detected", 
+                "Brake": "FailtoBrake",
+                "Camera ID": incoming_camera_id
+            }
         else:
-            # 조건 B: 지게차 시동 켜짐 (5초간 브레이크 대기)
             await redis_client.set("switch_status", "0")
             await asyncio.sleep(5) 
             
             switch_status = await redis_client.get("switch_status")
             if switch_status == "1":
-                helix_attributes = {"Smart Relay": "On", "Line Crossing": "detected", "Brake": "Hit"}
+                helix_attributes = {
+                    "Smart Relay": "On", 
+                    "Line Crossing": "detected", 
+                    "Brake": "Hit",
+                    "Camera ID": incoming_camera_id
+                }
             else:
-                helix_attributes = {"Smart Relay": "On", "Line Crossing": "detected", "Brake": "FailtoBrake"}
+                helix_attributes = {
+                    "Smart Relay": "On", 
+                    "Line Crossing": "detected", 
+                    "Brake": "FailtoBrake",
+                    "Camera ID": incoming_camera_id
+                }
 
         # Verkada API 호출 (Token 발급 -> Helix 전송)
         async with httpx.AsyncClient() as client:
