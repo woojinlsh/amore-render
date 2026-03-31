@@ -7,15 +7,20 @@ import redis.asyncio as redis
 
 app = FastAPI()
 
+# 환경변수 불러오기
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 VERKADA_API_KEY = os.getenv("VERKADA_API_KEY")
 TARGET_CAMERA_ID = os.getenv("TARGET_CAMERA_ID")
 ORG_ID = os.getenv("ORG_ID", "607ef9ff-2910-4a68-bfe6-318836f42d12")
 
+# ★ [추가됨] 허용할 카메라 ID 목록 불러오기 (쉼표로 구분된 문자열을 리스트로 변환)
+# 예: "cam-id-1,cam-id-2,cam-id-3" -> ["cam-id-1", "cam-id-2", "cam-id-3"]
+ALLOWED_CAMERAS_STR = os.getenv("ALLOWED_CAMERA_IDS", "")
+ALLOWED_CAMERAS = [cam.strip() for cam in ALLOWED_CAMERAS_STR.split(",") if cam.strip()]
+
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
-# 쿨다운 타임 설정 (예: 15초 = 15000ms)
-# 한 번 Line Crossing이 발생하면 15초 동안 들어오는 추가 알림은 무시합니다.
+# 쿨다운 타임 설정 (15초)
 COOLDOWN_MS = 15000 
 
 @app.post("/webhook")
@@ -40,22 +45,31 @@ async def handle_webhook(request: Request):
         await redis_client.set("switch_status", "1")
         return {"message": "Switch event recorded"}
 
-    # 3. Line Crossing 처리 (쿨다운 적용)
+    # 3. Line Crossing 처리 (필터링 및 쿨다운 적용)
     if event_category == "line_crossing":
+        
+        # --- [추가됨: 1. 카메라 ID 필터링 로직] ---
+        # 들어온 웹훅 데이터에서 카메라 ID를 추출합니다.
+        incoming_camera_id = payload.get("data", {}).get("camera_id")
+        
+        # 허용된 카메라 목록이 등록되어 있고, 들어온 카메라 ID가 그 목록에 없다면 무시합니다.
+        if ALLOWED_CAMERAS and incoming_camera_id not in ALLOWED_CAMERAS:
+            print(f"필터링됨: 허용되지 않은 카메라의 알림입니다. (ID: {incoming_camera_id})")
+            return {"message": f"Camera {incoming_camera_id} is not in allowed list. Ignored."}
+        # ----------------------------------------
+
         now = int(time.time() * 1000)
         
-        # --- [쿨다운 로직 시작] ---
+        # --- [2. 쿨다운 로직] ---
         last_crossing_str = await redis_client.get("last_line_crossing")
         last_crossing = int(last_crossing_str) if last_crossing_str else 0
         
-        # 마지막으로 처리한 시간으로부터 COOLDOWN_MS(15초)가 지나지 않았다면 무시
         if now - last_crossing < COOLDOWN_MS:
             print("쿨다운 적용 중: 중복 Line Crossing 이벤트 무시됨")
             return {"message": "Cooldown active. Ignored."}
             
-        # 쿨다운 통과 시, 현재 시간을 마지막 처리 시간으로 갱신
         await redis_client.set("last_line_crossing", now)
-        # --- [쿨다운 로직 끝] ---
+        # ------------------------
 
         last_heartbeat_str = await redis_client.get("last_heartbeat")
         last_heartbeat = int(last_heartbeat_str) if last_heartbeat_str else 0
