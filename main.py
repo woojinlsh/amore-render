@@ -47,59 +47,47 @@ async def handle_webhook(request: Request):
     # 3. Line Crossing 처리
     if event_category == "line_crossing":
         
-        # 들어온 웹훅 데이터에서 카메라 ID 추출
+        # 카메라 ID 추출 및 필터링
         incoming_camera_id = payload.get("data", {}).get("camera_id", "Unknown")
-        
-        # 카메라 ID 필터링 로직
         if ALLOWED_CAMERAS and incoming_camera_id not in ALLOWED_CAMERAS:
-            print(f"필터링됨: 허용되지 않은 카메라의 알림입니다. (ID: {incoming_camera_id})")
-            return {"message": f"Camera {incoming_camera_id} is not in allowed list. Ignored."}
+            print(f"필터링됨: 허용되지 않은 카메라 (ID: {incoming_camera_id})")
+            return {"message": "Camera ignored."}
 
         now = int(time.time() * 1000)
         
-        # 쿨다운 로직
+        # 쿨다운 로직 (중복 알림 방지)
         last_crossing_str = await redis_client.get("last_line_crossing")
         last_crossing = int(last_crossing_str) if last_crossing_str else 0
-        
         if now - last_crossing < COOLDOWN_MS:
-            print("쿨다운 적용 중: 중복 Line Crossing 이벤트 무시됨")
-            return {"message": "Cooldown active. Ignored."}
-            
+            return {"message": "Cooldown active."}
         await redis_client.set("last_line_crossing", now)
 
+        # 하트비트 체크 (오프라인 판정)
         last_heartbeat_str = await redis_client.get("last_heartbeat")
         last_heartbeat = int(last_heartbeat_str) if last_heartbeat_str else 0
         
-        # ★ [수정됨] 조건 A: 지게차/Shelly 오프라인 상태 처리 로직 변경
-        if now - last_heartbeat > 10000:
-            print("Shelly 오프라인 상태(Heartbeat 10초 초과)이므로 Helix 전송을 생략하고 종료합니다.")
-            return {"message": "Shelly is offline. Helix sending skipped."}
+        # ★ [수정됨] 하트비트가 7초(7000ms) 이상 지연되면 오프라인으로 간주
+        if now - last_heartbeat > 7000:
+            print(f"오프라인 감지: 마지막 하트비트로부터 {now - last_heartbeat}ms 경과. Helix 전송 생략.")
+            return {"message": "Shelly is offline (7s threshold). Helix skipped."}
             
-        # 조건 B: 지게차/Shelly 온라인 상태 (정상 작동 중)
+        # 온라인 상태인 경우 5초 대기 후 브레이크 확인 로직 실행
         await redis_client.set("switch_status", "0")
         await asyncio.sleep(5) 
         
         switch_status = await redis_client.get("switch_status")
         
-        helix_attributes = {}
-        if switch_status == "1":
-            helix_attributes = {
-                "Smart Relay": "On", 
-                "Line Crossing": "detected", 
-                "Brake": "Hit",
-                "Camera ID": incoming_camera_id
-            }
-        else:
-            helix_attributes = {
-                "Smart Relay": "On", 
-                "Line Crossing": "detected", 
-                "Brake": "FailtoBrake",
-                "Camera ID": incoming_camera_id
-            }
+        helix_attributes = {
+            "Smart Relay": "On", 
+            "Line Crossing": "detected", 
+            "Brake": "Hit" if switch_status == "1" else "FailtoBrake",
+            "Camera ID": incoming_camera_id
+        }
 
-        # Verkada API 호출 (Token 발급 -> Helix 전송)
+        # Verkada Helix API 전송
         async with httpx.AsyncClient() as client:
             try:
+                # Token 발급
                 token_res = await client.post(
                     "https://api.verkada.com/token",
                     headers={"accept": "application/json", "content-type": "application/json", "x-api-key": VERKADA_API_KEY},
@@ -107,28 +95,26 @@ async def handle_webhook(request: Request):
                 )
                 token_res.raise_for_status()
                 session_token = token_res.json().get("token")
-            except Exception as e:
-                print(f"Token 발급 실패: {e}")
-                return {"error": "Token request failed"}
 
-            helix_payload = {
-                "attributes": helix_attributes,
-                "event_type_uid": "a600af14-5504-4b3a-a344-8fc514fdeded",
-                "camera_id": TARGET_CAMERA_ID,
-                "time_ms": int(time.time() * 1000)
-            }
-            
-            try:
+                # Helix 이벤트 전송
+                helix_payload = {
+                    "attributes": helix_attributes,
+                    "event_type_uid": "a600af14-5504-4b3a-a344-8fc514fdeded",
+                    "camera_id": TARGET_CAMERA_ID,
+                    "time_ms": int(time.time() * 1000)
+                }
+                
                 helix_res = await client.post(
                     f"https://api.verkada.com/cameras/v1/video_tagging/event?org_id={ORG_ID}",
                     headers={"content-type": "application/json", "x-verkada-auth": session_token},
                     json=helix_payload
                 )
                 helix_res.raise_for_status()
-                print("Helix API 전송 성공!")
+                print(f"Helix API 전송 성공! (Brake: {helix_attributes['Brake']})")
                 return {"status": "Helix Triggered"}
+                
             except Exception as e:
-                print(f"Helix 전송 실패: {e}")
-                return {"error": "Helix request failed"}
+                print(f"Verkada API 통신 에러: {e}")
+                return {"error": str(e)}
 
     return {"message": "Unknown event ignored"}
