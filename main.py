@@ -7,17 +7,22 @@ import redis.asyncio as redis
 
 app = FastAPI()
 
-# 환경변수 설정
+# --- [설정값(Config) 불러오기 영역] ---
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 VERKADA_API_KEY = os.getenv("VERKADA_API_KEY")
 TARGET_CAMERA_ID = os.getenv("TARGET_CAMERA_ID")
 ORG_ID = os.getenv("ORG_ID", "607ef9ff-2910-4a68-bfe6-318836f42d12")
 
+# ★ [추가됨] Helix Event Type UID를 환경변수에서 불러옵니다.
+# (만약 환경변수에 값이 없다면 기존의 하드코딩된 값을 기본값으로 사용합니다.)
+HELIX_EVENT_TYPE_UID = os.getenv("HELIX_EVENT_TYPE_UID", "a600af14-5504-4b3a-a344-8fc514fdeded")
+
+# 허용할 카메라 ID 목록
 ALLOWED_CAMERAS_STR = os.getenv("ALLOWED_CAMERA_IDS", "")
 ALLOWED_CAMERAS = [cam.strip() for cam in ALLOWED_CAMERAS_STR.split(",") if cam.strip()]
+# -------------------------------------
 
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-
 COOLDOWN_MS = 15000 
 
 @app.post("/webhook")
@@ -39,7 +44,6 @@ async def handle_webhook(request: Request):
 
     # 2. Switch 처리
     if event_category == "switch":
-        # 브레이크를 밟았다는 신호(1)를 Redis에 저장
         await redis_client.set("switch_status", "1")
         return {"message": "Switch event recorded"}
 
@@ -65,34 +69,31 @@ async def handle_webhook(request: Request):
             print("Shelly 오프라인 상태로 판단하여 무시합니다.")
             return {"message": "Shelly is offline."}
             
-        # --- [수정된 핵심 로직: 5초 실시간 감지 루프] ---
-        await redis_client.set("switch_status", "0") # 상태 초기화
+        # 5초 실시간 감지 루프
+        await redis_client.set("switch_status", "0")
         
         brake_detected = False
         start_time = time.time()
         
         print(f"[{incoming_camera_id}] Line Crossing 발생! 5초간 브레이크 감지 시작...")
         
-        # 5초 동안 0.2초 간격으로 Redis의 switch_status를 확인합니다.
         while time.time() - start_time < 5.0:
             current_status = await redis_client.get("switch_status")
             if current_status == "1":
                 brake_detected = True
                 print(f"[{incoming_camera_id}] 5초 이내 브레이크 감지 성공!")
                 break
-            await asyncio.sleep(0.2) # 서버 부하를 줄이기 위한 미세한 대기
+            await asyncio.sleep(0.2)
             
         if not brake_detected:
             print(f"[{incoming_camera_id}] 5초 이내 브레이크 감지 실패.")
 
-        # 결과에 따른 속성 설정
         helix_attributes = {
             "Smart Relay": "On", 
             "Line Crossing": "detected", 
             "Brake": "Hit" if brake_detected else "FailtoBrake",
             "Camera ID": incoming_camera_id
         }
-        # ------------------------------------------------
 
         # Verkada Helix API 전송
         async with httpx.AsyncClient() as client:
@@ -105,9 +106,10 @@ async def handle_webhook(request: Request):
                 token_res.raise_for_status()
                 session_token = token_res.json().get("token")
 
+                # ★ [수정됨] 하드코딩된 값 대신 변수(HELIX_EVENT_TYPE_UID)를 사용합니다.
                 helix_payload = {
                     "attributes": helix_attributes,
-                    "event_type_uid": "a600af14-5504-4b3a-a344-8fc514fdeded",
+                    "event_type_uid": HELIX_EVENT_TYPE_UID, 
                     "camera_id": TARGET_CAMERA_ID,
                     "time_ms": int(time.time() * 1000)
                 }
