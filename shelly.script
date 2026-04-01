@@ -1,0 +1,56 @@
+// ★ Render.com에서 발급받은 실제 Webhook URL로 변경하세요.
+let WEBHOOK_URL = "https://verkada-webhook-xxxx.onrender.com/webhook"; 
+
+let HEADERS = {"Content-Type": "application/json"};
+let lastSwitchState = null;
+let isRequestPending = false; // ★ 메모리 누수 방지용 락(Lock)
+
+function sendData(data, logPrefix, isUrgent) {
+  // 1. 긴급하지 않은 데이터(Heartbeat)인데 이전 통신이 안 끝났다면 
+  // 메모리에 쌓이지 않도록 과감하게 드랍(버림)합니다.
+  if (isRequestPending && !isUrgent) {
+    print(logPrefix + " 이전 통신 대기 중. 메모리 보호를 위해 드랍합니다.");
+    return; 
+  }
+
+  isRequestPending = true;
+
+  Shelly.call(
+    "HTTP.POST", 
+    {
+      url: WEBHOOK_URL,
+      body: JSON.stringify(data),
+      headers: HEADERS,
+      timeout: 2 // ★ 핵심: 2초 이상 서버 응답이 없으면 통신을 강제 취소 (무한 대기 방지)
+    }, 
+    function(response, error_code, error_message) {
+      isRequestPending = false; // 응답을 받거나 타임아웃 되면 락을 풉니다.
+
+      if (error_code !== 0) {
+        print(logPrefix + " 전송 실패: " + JSON.stringify(error_message));
+      }
+    }
+  );
+}
+
+// 1. Heartbeat 타이머 (3초 주기) - 일반 데이터
+Timer.set(3000, true, function() {
+  sendData({ type: "heartbeat", status: "alive" }, "[Heartbeat]", false);
+});
+
+// 2. 이벤트 핸들러 (스위치 조작 감지) - 긴급 데이터
+Shelly.addEventHandler(function(event) {
+  if (!event || !event.info) return;
+
+  if (event.info.component === "switch:0" && typeof event.info.state !== "undefined") {
+    let currentState = event.info.state;
+    
+    if (currentState !== lastSwitchState) {
+      lastSwitchState = currentState;
+      // 브레이크 신호는 누락되면 안 되므로 isUrgent(긴급) 플래그를 true로 보냅니다.
+      sendData({ type: "switch", state: currentState }, "[Switch]", true);
+    }
+  }
+});
+
+print("✅ 무중단(Anti-Crash) Shelly 스크립트가 시작되었습니다.");
