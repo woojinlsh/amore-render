@@ -3,24 +3,20 @@ import asyncio
 import httpx
 import time
 import os
+import json
 import redis.asyncio as redis
 
 app = FastAPI()
 
-# --- [설정값(Config) 불러오기 영역] ---
+# 환경변수 설정
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 VERKADA_API_KEY = os.getenv("VERKADA_API_KEY")
 TARGET_CAMERA_ID = os.getenv("TARGET_CAMERA_ID")
 ORG_ID = os.getenv("ORG_ID", "607ef9ff-2910-4a68-bfe6-318836f42d12")
-
-# ★ [추가됨] Helix Event Type UID를 환경변수에서 불러옵니다.
-# (만약 환경변수에 값이 없다면 기존의 하드코딩된 값을 기본값으로 사용합니다.)
 HELIX_EVENT_TYPE_UID = os.getenv("HELIX_EVENT_TYPE_UID", "a600af14-5504-4b3a-a344-8fc514fdeded")
 
-# 허용할 카메라 ID 목록
 ALLOWED_CAMERAS_STR = os.getenv("ALLOWED_CAMERA_IDS", "")
 ALLOWED_CAMERAS = [cam.strip() for cam in ALLOWED_CAMERAS_STR.split(",") if cam.strip()]
-# -------------------------------------
 
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 COOLDOWN_MS = 15000 
@@ -62,7 +58,7 @@ async def handle_webhook(request: Request):
             return {"message": "Cooldown active."}
         await redis_client.set("last_line_crossing", now)
 
-        # 하트비트 체크 (7초 임계값)
+        # 하트비트 체크
         last_heartbeat_str = await redis_client.get("last_heartbeat")
         last_heartbeat = int(last_heartbeat_str) if last_heartbeat_str else 0
         if now - last_heartbeat > 7000:
@@ -106,7 +102,6 @@ async def handle_webhook(request: Request):
                 token_res.raise_for_status()
                 session_token = token_res.json().get("token")
 
-                # ★ [수정됨] 하드코딩된 값 대신 변수(HELIX_EVENT_TYPE_UID)를 사용합니다.
                 helix_payload = {
                     "attributes": helix_attributes,
                     "event_type_uid": HELIX_EVENT_TYPE_UID, 
@@ -114,11 +109,23 @@ async def handle_webhook(request: Request):
                     "time_ms": int(time.time() * 1000)
                 }
                 
+                # ★ [디버그 1] Verkada로 쏘기 직전의 원본 데이터를 로그에 이쁘게 찍어봅니다.
+                print(f"\n========== [DEBUG: 보내는 데이터] ==========")
+                print(json.dumps(helix_payload, indent=2, ensure_ascii=False))
+                print(f"============================================")
+                
                 helix_res = await client.post(
                     f"https://api.verkada.com/cameras/v1/video_tagging/event?org_id={ORG_ID}",
                     headers={"content-type": "application/json", "x-verkada-auth": session_token},
                     json=helix_payload
                 )
+                
+                # ★ [디버그 2] Verkada 서버의 실제 응답 내용을 찍어봅니다.
+                print(f"\n========== [DEBUG: Verkada 응답] ===========")
+                print(f"상태 코드: {helix_res.status_code}")
+                print(f"응답 내용: {helix_res.text}")
+                print(f"============================================\n")
+                
                 helix_res.raise_for_status()
                 print(f"Helix 전송 성공! 결과: {helix_attributes['Brake']}")
                 return {"status": "Helix Triggered", "result": helix_attributes['Brake']}
