@@ -43,6 +43,8 @@ async def handle_webhook(request: Request):
     # 2. Switch 처리
     if event_category == "switch":
         await redis_client.set("switch_status", "1")
+        # ★ 브레이크를 밟을 때마다 실시간으로 확인하기 위한 시각적 로그
+        print(f"\n🟢 [Shelly] 브레이크(Switch) 밟음 신호 수신 완료! (Redis 업데이트됨)\n")
         return {"message": "Switch event recorded"}
 
     # 3. Line Crossing 처리
@@ -79,72 +81,10 @@ async def handle_webhook(request: Request):
             current_status = await redis_client.get("switch_status")
             if current_status == "1":
                 brake_detected = True
-                # ★ 브레이크 HIT 감지 시 눈에 확 띄는 로그
+                # ★ 브레이크 HIT 감지 시 5초 이내에 출력되는 로그
                 print(f"\n" + "="*50)
                 print(f" 🚨🚨🚨 [BRAKE: HIT] 브레이크 정상 작동 감지! 🚨🚨🚨")
                 print(f"        (Camera ID: {incoming_camera_id})")
                 print("="*50 + "\n")
                 break
-            await asyncio.sleep(0.2) # 서버 부하를 줄이기 위한 미세 대기
-            
-        if not brake_detected:
-            # ★ 브레이크 실패 시 눈에 띄는 로그
-            print(f"\n" + "-"*50)
-            print(f" ❌❌❌ [BRAKE: FAIL] 5초 내 브레이크 감지 실패 ❌❌❌")
-            print(f"        (Camera ID: {incoming_camera_id})")
-            print("-"*50 + "\n")
-        # -----------------------------------
-
-        helix_attributes = {
-            "Smart Relay": "On", 
-            "Line Crossing": "detected", 
-            "Brake": "Hit" if brake_detected else "FailtoBrake",
-            "Camera ID": incoming_camera_id
-        }
-
-        # Verkada Helix API 전송
-        async with httpx.AsyncClient() as client:
-            try:
-                # [STEP 1] Token 발급
-                token_res = await client.post(
-                    "https://api.verkada.com/token",
-                    headers={"accept": "application/json", "content-type": "application/json", "x-api-key": VERKADA_API_KEY},
-                    json={}
-                )
-                token_res.raise_for_status()
-                session_token = token_res.json().get("token")
-
-                # [STEP 2] Helix 이벤트 전송
-                helix_payload = {
-                    "attributes": helix_attributes,
-                    "event_type_uid": HELIX_EVENT_TYPE_UID, 
-                    "camera_id": TARGET_CAMERA_ID,
-                    "time_ms": int(time.time() * 1000)
-                }
-                
-                # (선택) Verkada로 쏘기 직전의 원본 데이터 디버그 출력
-                print(f"========== [DEBUG: 보내는 데이터] ==========")
-                print(json.dumps(helix_payload, indent=2, ensure_ascii=False))
-                print(f"============================================")
-                
-                helix_res = await client.post(
-                    f"https://api.verkada.com/cameras/v1/video_tagging/event?org_id={ORG_ID}",
-                    headers={"content-type": "application/json", "x-verkada-auth": session_token},
-                    json=helix_payload
-                )
-                
-                helix_res.raise_for_status()
-                
-                # ★ Helix 전송 최종 결과 구분 로그
-                if brake_detected:
-                    print(f"✅ [SUCCESS] Helix 전송 완료 -> 상태: [Hit] (정상 정지)\n")
-                else:
-                    print(f"⚠️ [WARNING] Helix 전송 완료 -> 상태: [FailtoBrake] (위험)\n")
-                    
-                return {"status": "Helix Triggered", "result": helix_attributes['Brake']}
-                
-            except Exception as e:
-                print(f"API 에러: {e}")
-                return {"error": str(e)}
-
-    return {"message": "Unknown event ignored"}
+            await asyncio.sleep(0.2) # 서버 부하
